@@ -4,7 +4,8 @@
 
 // TODO
 // - macro gen for I2S 2 and 3
-// - as master mode support
+// - read/write traits
+// - error checking
 
 use crate::gpio::gpiob::{PB10, PB12, PB13, PB14, PB15, PB9};
 use crate::gpio::gpioc::PC6;
@@ -45,11 +46,12 @@ impl PinExtSd<SPI2> for PB14<Alternate<AF6>> {}
 pub trait PinMck<I2S> {}
 impl PinMck<SPI2> for PC6<Alternate<AF5>> {}
 
-impl<I2S, SD, CK, WS> Pins<I2S> for (SD, CK, WS)
+impl<I2S, SD, CK, WS, MCK> Pins<I2S> for (SD, CK, WS, MCK)
 where
     SD: PinSd<I2S>,
     CK: PinCk<I2S>,
     WS: PinWs<I2S>,
+    MCK: PinMck<I2S>,
 {
 }
 
@@ -131,38 +133,72 @@ impl<PINS> I2s<SPI2, PINS> {
         rcc.apb1rstr.modify(|_, w| w.spi2rst().set_bit());
         rcc.apb1rstr.modify(|_, w| w.spi2rst().clear_bit());
 
+        // TODO
+        // values used from chart expect VCO 1 MHz or 2 MHz?
+        // PLLI2SN(271) and PLLI2SR(2) from chart
+        //
+        // PLLI2SN(86) and PLLI2SR(4) from ex
+        rcc.plli2scfgr
+            .modify(|_, w| unsafe { w.plli2sn().bits(271).plli2sr().bits(2) });
+        //.modify(|_, w| unsafe { w.plli2sn().bits(86).plli2sr().bits(4) });
+
         I2s { spi, pins }
     }
 
-    /// Configure in slave mode as output
-    pub fn into_slave_output<S: I2sData>(
+    /// Configure in master mode as output, half-duplex
+    pub fn into_master_output<S: I2sData>(
         self,
         standard: I2sStandard,
-    ) -> I2sOutput<SlaveRole, S, SPI2, PINS> {
+    ) -> I2sOutput<MasterRole, S, SPI2, PINS> {
+        // TODO - frequency provided as param
+        // for now assume:
+        // - I2S_AUDIOFREQ_44K == 44100
+        // - what about PLLI2SN(271) and PLLI2SR(2)?
+        self.spi.i2spr.modify(|_, w| {
+            unsafe {
+                // Master clock output enabled
+                w.mckoe()
+                    .set_bit()
+                    // With master mode and 44K, always zero
+                    .odd()
+                    .clear_bit()
+                    // 44K divider
+                    .i2sdiv()
+                    .bits(6)
+            }
+        });
+
+        // TODO
+        // - PCMSYNC used with PCM standard
+        // - assume I2S_CPOL_LOW
+        // - is chlen right?
         self.spi.i2scfgr.modify(|_, w| {
             unsafe {
                 // Select I2S mode
                 w.i2smod()
                     .set_bit()
-                    // Configuration (slave, output)
+                    // Configuration (master, output)
                     .i2scfg()
-                    .bits(0b00)
+                    .bits(0b10)
                     .i2sstd()
                     .bits(standard as u8)
-                    // data length
+                    // Polarity
+                    .ckpol()
+                    .clear_bit()
+                    // Data length
                     .datlen()
                     .bits(S::datlen())
-                    // "auto"
+                    // "auto" / 16-bit?
                     .chlen()
                     .clear_bit()
             }
         });
+
         // If needed, select all the potential interrupt
         // sources and the DMA capabilities by writing the
         // SPI_CR2 register.
 
-        // The I2SE bit in SPI_I2SCFGR register must be
-        // set.
+        // Enable I2S
         self.spi.i2scfgr.modify(|_, w| w.i2se().set_bit());
 
         I2sOutput {
