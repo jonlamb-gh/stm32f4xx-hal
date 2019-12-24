@@ -1,6 +1,7 @@
 //! I2S bus
-
-// NOTE: based on https://github.com/astro/stm32f429-hal/blob/master/src/i2s.rs
+//!
+//! This was based on
+//! https://github.com/astro/stm32f429-hal/blob/master/src/i2s.rs
 
 // TODO
 // - macro gen for I2S 2 and 3
@@ -133,14 +134,12 @@ impl<PINS> I2s<SPI2, PINS> {
         rcc.apb1rstr.modify(|_, w| w.spi2rst().set_bit());
         rcc.apb1rstr.modify(|_, w| w.spi2rst().clear_bit());
 
-        // TODO
-        // values used from chart expect VCO 1 MHz or 2 MHz?
-        // PLLI2SN(271) and PLLI2SR(2) from chart
-        //
-        // PLLI2SN(86) and PLLI2SR(4) from ex
+        rcc.cr.modify(|_, w| w.plli2son().set_bit());
+        while !rcc.cr.read().plli2srdy().bit() {}
+
+        // TODO - values taken from the examples
         rcc.plli2scfgr
-            .modify(|_, w| unsafe { w.plli2sn().bits(271).plli2sr().bits(2) });
-        //.modify(|_, w| unsafe { w.plli2sn().bits(86).plli2sr().bits(4) });
+            .modify(|_, w| unsafe { w.plli2sn().bits(86).plli2sr().bits(4).plli2sq().bits(0) });
 
         I2s { spi, pins }
     }
@@ -153,25 +152,23 @@ impl<PINS> I2s<SPI2, PINS> {
         // TODO - frequency provided as param
         // for now assume:
         // - I2S_AUDIOFREQ_44K == 44100
-        // - what about PLLI2SN(271) and PLLI2SR(2)?
         self.spi.i2spr.modify(|_, w| {
             unsafe {
-                // Master clock output enabled
+                // Master clock output disabled
                 w.mckoe()
-                    .set_bit()
+                    .clear_bit()
                     // With master mode and 44K, always zero
                     .odd()
                     .clear_bit()
                     // 44K divider
                     .i2sdiv()
-                    .bits(6)
+                    .bits(15)
             }
         });
 
         // TODO
         // - PCMSYNC used with PCM standard
         // - assume I2S_CPOL_LOW
-        // - is chlen right?
         self.spi.i2scfgr.modify(|_, w| {
             unsafe {
                 // Select I2S mode
@@ -188,7 +185,7 @@ impl<PINS> I2s<SPI2, PINS> {
                     // Data length
                     .datlen()
                     .bits(S::datlen())
-                    // "auto" / 16-bit?
+                    // "auto" / 16-bit
                     .chlen()
                     .clear_bit()
             }
