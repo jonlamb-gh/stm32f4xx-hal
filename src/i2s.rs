@@ -103,6 +103,7 @@ pub trait I2sData {
     /// Value for I2C `datlen` register field.
     fn datlen() -> u8;
     /// Run given `f` closure for each 16-bit part of the value.
+    #[allow(patterns_in_fns_without_body)]
     fn for_u16<F: FnMut(u16) -> Result<(), Error>>(&self, mut f: F) -> Result<(), Error>;
 }
 
