@@ -81,6 +81,18 @@ pub enum I2sStandard {
     Pcm = 0b11,
 }
 
+pub trait Write<W: I2sData + Sized> {
+    type Error;
+
+    fn write(&mut self, words: &[W]) -> Result<(), Self::Error>;
+}
+
+pub trait Read<W: I2sData + Sized> {
+    type Error;
+
+    fn read(&mut self, words: &mut [W]) -> Result<(), Self::Error>;
+}
+
 /// I2S peripheral
 #[allow(unused)]
 pub struct I2s<SPI, PINS> {
@@ -230,8 +242,7 @@ impl<'s, Role, S: I2sData + Sized + 's, PINS> I2sOutput<Role, S, SPI2, PINS> {
         }
     }
 
-    /// Write data word
-    pub fn write(&mut self, data: S) -> Result<(), Error> {
+    pub fn write_word(&mut self, data: S) -> Result<(), Error> {
         data.for_u16(|word| nb::block!(self.send(word)))?;
         Ok(())
     }
@@ -251,5 +262,16 @@ impl<'s, Role, S: I2sData + Sized + 's, PINS> I2sOutput<Role, S, SPI2, PINS> {
         } else {
             nb::Error::WouldBlock
         })
+    }
+}
+
+impl<Role, PINS> Write<u16> for I2sOutput<Role, u16, SPI2, PINS> {
+    type Error = Error;
+
+    fn write(&mut self, words: &[u16]) -> Result<(), Self::Error> {
+        for w in words.iter() {
+            self.write_word(*w)?;
+        }
+        Ok(())
     }
 }
