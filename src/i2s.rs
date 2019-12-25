@@ -3,17 +3,25 @@
 //! This was based on
 //! https://github.com/astro/stm32f429-hal/blob/master/src/i2s.rs
 
-// TODO
-// - macro gen for I2S 2 and 3
-// - read/write traits
-// - error checking
-
 use crate::gpio::gpiob::{PB10, PB12, PB13, PB14, PB15, PB9};
 use crate::gpio::gpioc::PC6;
 use crate::gpio::{Alternate, AF5, AF6};
 use crate::rcc::Clocks;
 use crate::stm32::{RCC, SPI2};
 use core::marker::PhantomData;
+
+/// I2S error
+#[derive(Debug)]
+pub enum Error {
+    /// Overrun occurred
+    Overrun,
+    /// Underrun occurred
+    Underrun,
+    /// Frame format error occured
+    FrameFormat,
+    #[doc(hidden)]
+    _Extensible,
+}
 
 pub trait Pins<I2S> {}
 
@@ -95,7 +103,7 @@ pub trait I2sData {
     /// Value for I2C `datlen` register field.
     fn datlen() -> u8;
     /// Run given `f` closure for each 16-bit part of the value.
-    fn for_u16<F: Fn(u16)>(&self, f: F);
+    fn for_u16<F: FnMut(u16) -> Result<(), Error>>(&self, mut f: F) -> Result<(), Error>;
 }
 
 impl I2sData for u16 {
@@ -103,8 +111,8 @@ impl I2sData for u16 {
         0b00
     }
     #[inline]
-    fn for_u16<F: Fn(u16)>(&self, f: F) {
-        f(*self);
+    fn for_u16<F: FnMut(u16) -> Result<(), Error>>(&self, mut f: F) -> Result<(), Error> {
+        f(*self)
     }
 }
 
@@ -113,9 +121,9 @@ impl I2sData for u32 {
         0b10
     }
     #[inline]
-    fn for_u16<F: Fn(u16)>(&self, f: F) {
-        f((*self >> 16) as u16);
-        f(*self as u16);
+    fn for_u16<F: FnMut(u16) -> Result<(), Error>>(&self, mut f: F) -> Result<(), Error> {
+        f((*self >> 16) as u16)?;
+        f(*self as u16)
     }
 }
 
@@ -222,10 +230,25 @@ impl<'s, Role, S: I2sData + Sized + 's, PINS> I2sOutput<Role, S, SPI2, PINS> {
     }
 
     /// Write data word
-    pub fn write(&mut self, data: S) {
-        data.for_u16(|word| {
-            while !self.spi.sr.read().txe().bit() {}
-            self.spi.dr.write(|w| w.dr().bits(word));
-        });
+    pub fn write(&mut self, data: S) -> Result<(), Error> {
+        data.for_u16(|word| nb::block!(self.send(word)))?;
+        Ok(())
+    }
+
+    pub fn send(&mut self, data: u16) -> nb::Result<(), Error> {
+        let sr = self.spi.sr.read();
+
+        Err(if sr.ovr().bit_is_set() {
+            nb::Error::Other(Error::Overrun)
+        } else if sr.fre().bit_is_set() {
+            nb::Error::Other(Error::FrameFormat)
+        } else if sr.udr().bit_is_set() {
+            nb::Error::Other(Error::Underrun)
+        } else if sr.txe().bit_is_set() {
+            self.spi.dr.write(|w| w.dr().bits(data));
+            return Ok(());
+        } else {
+            nb::Error::WouldBlock
+        })
     }
 }
