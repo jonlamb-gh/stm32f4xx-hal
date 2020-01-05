@@ -1,5 +1,3 @@
-use core::fmt;
-
 /// Bits per second
 #[derive(PartialEq, PartialOrd, Clone, Copy)]
 pub struct Bps(pub u32);
@@ -74,21 +72,3 @@ impl Into<KiloHertz> for MegaHertz {
 /// Time unit
 #[derive(PartialEq, PartialOrd, Clone, Copy)]
 pub struct MilliSeconds(pub u32);
-
-pub use core::time::Duration;
-
-pub type Instant = core::time::Duration;
-
-pub struct DisplayableInstant(pub Instant);
-
-impl From<Instant> for DisplayableInstant {
-    fn from(i: Instant) -> DisplayableInstant {
-        DisplayableInstant(i)
-    }
-}
-
-impl fmt::Display for DisplayableInstant {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}.{}", self.0.as_secs(), self.0.subsec_nanos())
-    }
-}
