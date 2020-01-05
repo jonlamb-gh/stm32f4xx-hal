@@ -4,10 +4,10 @@
 //! https://github.com/astro/stm32f429-hal/blob/master/src/i2s.rs
 
 use crate::gpio::gpiob::{PB10, PB12, PB13, PB14, PB15, PB9};
-use crate::gpio::gpioc::PC6;
+use crate::gpio::gpioc::{PC2, PC6};
 use crate::gpio::{Alternate, AF5, AF6};
 use crate::rcc::Clocks;
-use crate::stm32::{RCC, SPI2};
+use crate::stm32::{I2S2EXT, RCC, SPI2};
 use core::marker::PhantomData;
 
 /// I2S error
@@ -47,6 +47,7 @@ impl PinCk<SPI2> for PB13<Alternate<AF5>> {}
 /// I 2 S full duplex mode.
 pub trait PinExtSd<I2S> {}
 impl PinExtSd<SPI2> for PB14<Alternate<AF6>> {}
+impl PinExtSd<SPI2> for PC2<Alternate<AF6>> {}
 
 /// MCK: Master Clock (mapped separately) is used, when the I 2 S is configured in master
 /// mode (and when the MCKOE bit in the SPI_I2SPR register is set), to output this
@@ -70,6 +71,7 @@ pub struct SlaveRole {}
 pub struct MasterRole {}
 
 /// I2S standard
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum I2sStandard {
     /// I2S Philips standard.
     Philips = 0b00,
@@ -100,13 +102,24 @@ pub struct I2s<SPI, PINS> {
     pins: PINS,
 }
 
-/// I2S peripheral
+/// I2S transmitter
 #[allow(unused)]
 pub struct I2sOutput<Role, Data, SPI, PINS> {
     role: PhantomData<Role>,
     data: PhantomData<Data>,
     spi: SPI,
     pins: PINS,
+}
+
+/// I2S transmitter and receiver, full-duplex
+#[allow(unused)]
+pub struct I2sFullDuplex<Role, Data, SPI, EXT, PINS, SD_EXT> {
+    role: PhantomData<Role>,
+    data: PhantomData<Data>,
+    spi: SPI,
+    ext: EXT,
+    pins: PINS,
+    pin_sd_ext: SD_EXT,
 }
 
 /// Implemented by data types that fit the device's data width: `u16`,
@@ -226,6 +239,66 @@ impl<PINS> I2s<SPI2, PINS> {
             pins: self.pins,
         }
     }
+
+    /// Master transmit, slave receive
+    pub fn into_master_full_duplex<S: I2sData, SD_EXT: PinExtSd<SPI2>>(
+        self,
+        ext: I2S2EXT,
+        pin_sd_ext: SD_EXT,
+        standard: I2sStandard,
+    ) -> I2sFullDuplex<MasterRole, S, SPI2, I2S2EXT, PINS, SD_EXT> {
+        // Enable receiver before enabling I2S
+        ext.i2scfgr.modify(|_, w| w.i2se().set_bit());
+        //ext.i2scfgr.modify(|_, w| w.i2se().clear_bit());
+
+        // Clear overrun, read DR, read SR
+        let _ = ext.dr.read().bits();
+        let _ = ext.sr.read().bits();
+
+        // Configure I2S, master tx
+        let master_out = self.into_master_output::<S>(standard);
+        let spi = master_out.spi;
+        let pins = master_out.pins;
+
+        // Configure I2S_ext, slave rx
+        ext.i2spr
+            .modify(|_, w| unsafe { w.mckoe().clear_bit().odd().clear_bit().i2sdiv().bits(2) });
+        //.modify(|_, w| unsafe { w.mckoe().clear_bit().odd().clear_bit().i2sdiv().bits(15) });
+
+        ext.i2scfgr.modify(|_, w| {
+            unsafe {
+                // Select I2S mode
+                w.i2smod()
+                    .set_bit()
+                    // Configuration (slave, input))
+                    .i2scfg()
+                    .bits(0b01)
+                    .i2sstd()
+                    .bits(standard as u8)
+                    // Polarity
+                    .ckpol()
+                    .clear_bit()
+                    // Data length
+                    .datlen()
+                    .bits(S::datlen())
+                    // "auto" / 16-bit
+                    .chlen()
+                    .clear_bit()
+            }
+        });
+
+        // Enable I2S
+        ext.i2scfgr.modify(|_, w| w.i2se().set_bit());
+
+        I2sFullDuplex {
+            role: PhantomData,
+            data: PhantomData,
+            spi,
+            ext,
+            pins,
+            pin_sd_ext,
+        }
+    }
 }
 
 impl<'s, Role, S: I2sData + Sized + 's, PINS> I2sOutput<Role, S, SPI2, PINS> {
@@ -271,6 +344,81 @@ impl<Role, PINS> Write<u16> for I2sOutput<Role, u16, SPI2, PINS> {
     fn write(&mut self, words: &[u16]) -> Result<(), Self::Error> {
         for w in words.iter() {
             self.write_word(*w)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'s, Role, S: I2sData + Sized + 's, PINS, SD_EXT>
+    I2sFullDuplex<Role, S, SPI2, I2S2EXT, PINS, SD_EXT>
+{
+    pub fn write_word(&mut self, data: S) -> Result<(), Error> {
+        data.for_u16(|word| nb::block!(self.send(word)))?;
+        Ok(())
+    }
+
+    // TODO - handle u32
+    pub fn read_word(&mut self) -> Result<u16, Error> {
+        let data = nb::block!(self.read())?;
+        Ok(data)
+    }
+
+    pub fn send(&mut self, data: u16) -> nb::Result<(), Error> {
+        let sr = self.spi.sr.read();
+
+        Err(if sr.ovr().bit_is_set() {
+            nb::Error::Other(Error::Overrun)
+        } else if sr.fre().bit_is_set() {
+            nb::Error::Other(Error::FrameFormat)
+        } else if sr.udr().bit_is_set() {
+            nb::Error::Other(Error::Underrun)
+        } else if sr.txe().bit_is_set() {
+            self.spi.dr.write(|w| w.dr().bits(data));
+            return Ok(());
+        } else {
+            nb::Error::WouldBlock
+        })
+    }
+
+    pub fn read(&mut self) -> nb::Result<u16, Error> {
+        let sr = self.ext.sr.read();
+
+        Err(if sr.ovr().bit_is_set() {
+            nb::Error::Other(Error::Overrun)
+        } else if sr.fre().bit_is_set() {
+            nb::Error::Other(Error::FrameFormat)
+        } else if sr.udr().bit_is_set() {
+            nb::Error::Other(Error::Underrun)
+        } else if sr.rxne().bit_is_set() {
+            panic!("GOT RX DATA");
+            return Ok(self.ext.dr.read().dr().bits());
+        } else {
+            let bits = sr.bits();
+            if bits != 0x2 {
+                panic!("0x{:X}", bits);
+            }
+            nb::Error::WouldBlock
+        })
+    }
+}
+
+impl<Role, PINS, SD_EXT> Write<u16> for I2sFullDuplex<Role, u16, SPI2, I2S2EXT, PINS, SD_EXT> {
+    type Error = Error;
+
+    fn write(&mut self, words: &[u16]) -> Result<(), Self::Error> {
+        for w in words.iter() {
+            self.write_word(*w)?;
+        }
+        Ok(())
+    }
+}
+
+impl<Role, PINS, SD_EXT> Read<u16> for I2sFullDuplex<Role, u16, SPI2, I2S2EXT, PINS, SD_EXT> {
+    type Error = Error;
+
+    fn read(&mut self, words: &mut [u16]) -> Result<(), Self::Error> {
+        for w in words {
+            *w = self.read_word()?;
         }
         Ok(())
     }
